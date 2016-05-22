@@ -1,0 +1,12 @@
+#
+#
+#
+
+general:
+  phantomjs: /usr/local/bin/phantomjs
+  importers:
+    - amazon
+
+amazon:
+  email:
+  password:
