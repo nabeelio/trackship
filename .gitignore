@@ -66,3 +66,4 @@ trackship.iml
 config.yaml
 *.png
 ghostdriver.log*
+tmp/*.yaml

@@ -1,4 +1,5 @@
 
+import yaml
 from trackship import config
 
 from selenium import webdriver
@@ -16,25 +17,35 @@ class PhantomJS(object):
                      "AppleWebKit/600.1.4 (KHTML, like Gecko) Version/8.0 "
                      "Mobile/12B440 Safari/600.1.4")
 
-    def __init__(self, user_agent=USERAGENT_IOS):
+    USERAGENT_AMZ = ("Mozilla/4.0 (compatible; Linux 2.6.22) "
+                     "NetFront/3.4 Kindle/2.0 (screen 600x800)")
+
+    def __init__(self, user_agent=None, cookies_file=None):
         """
         Initialize the phantom JS selenium driver
         :return:
         """
         self.conf = config
-        self.cookies = None
+        self.cookies_file = '{b}/{f}'.format(
+            b=config['general']['tmp_path'],
+            f=cookies_file
+        )
 
         # http://phantomjs.org/api/webpage/property/settings.html
         dcap = dict(DesiredCapabilities.PHANTOMJS)
         dcap["phantomjs.page.settings.loadImages"] = False
-        dcap["phantomjs.page.settings.userAgent"] = user_agent
         dcap["phantomjs.page.settings.webSecurityEnabled"] = False
         dcap["phantomjs.page.settings.localToRemoteUrlAccessEnabled"] = True
+
+        if user_agent:
+            dcap["phantomjs.page.settings.userAgent"] = user_agent
 
         self.driver = webdriver.PhantomJS(
             desired_capabilities=dcap,
             executable_path=self.conf['general']['phantomjs']
         )
+
+        self.load_cookies()
 
         self.driver.implicitly_wait(30)
         self.driver.set_window_size(1024, 768)
@@ -49,9 +60,27 @@ class PhantomJS(object):
         if self.driver:
             return self.driver.page_source
 
+    @property
+    def cookies(self):
+        if self.driver:
+            return self.driver.get_cookies()
+
     def get(self, url):
         if self.driver:
             return self.driver.get(url)
+
+    def load_cookies(self):
+        try:
+            with open(self.cookies_file, 'r') as f:
+                cookies = yaml.load(f)
+                for cookie in cookies:
+                    self.driver.add_cookie(cookie)
+        except FileNotFoundError:
+            pass
+
+    def save_cookies(self):
+        with open(self.cookies_file, 'w') as f:
+            yaml.dump(self.cookies, f)
 
     def find_element(self, xpath):
         element = None
@@ -86,7 +115,6 @@ class PhantomJS(object):
             else:
                 elem.send_keys(value)
 
-        self.screenshot('form_filled_new.png')
         if elem and submit:
             elem.send_keys(Keys.ENTER)
 

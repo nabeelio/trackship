@@ -9,7 +9,11 @@ from trackship.importers.amazon import Importer
 class AmazonImporterTest(unittest.TestCase):
 
     def setUp(self):
-        self.pjs = PhantomJS()
+        self.pjs = PhantomJS(
+            cookies_file='amazon.yaml',
+            user_agent=PhantomJS.USERAGENT_IOS,
+        )
+
         self.importer = Importer(self.pjs)
 
     def test_login_page(self):
