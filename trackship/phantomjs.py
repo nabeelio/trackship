@@ -4,6 +4,7 @@ from trackship import config
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.support.ui import Select
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.desired_capabilities import DesiredCapabilities
@@ -63,7 +64,7 @@ class PhantomJS(object):
 
         return element
 
-    def fill_form(self, *fields):
+    def fill_form(self, fields=(), submit=True):
         """
         Fill in a form and press enter on last
         :param fields: list of tupules:
@@ -73,11 +74,20 @@ class PhantomJS(object):
         """
         elem = None
         for input_id, value in fields:
-            elem = self.find_element("//input[@id='{id}']".format(id=input_id))
-            elem.send_keys(value)
+            if '//' in input_id:
+                find = input_id
+            else:
+                find = "//input[@id='{id}']".format(id=input_id)
 
-        self.screenshot('form_filled.png')
-        if elem:
+            elem = self.find_element(find)
+            if elem.tag_name == 'select':
+                select = Select(elem)
+                select.select_by_visible_text(value)
+            else:
+                elem.send_keys(value)
+
+        self.screenshot('form_filled_new.png')
+        if elem and submit:
             elem.send_keys(Keys.ENTER)
 
     def screenshot(self, path):

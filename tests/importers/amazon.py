@@ -19,7 +19,9 @@ class AmazonImporterTest(unittest.TestCase):
         """
         """
         self.pjs.get('tests/fixtures/importers/amazon/orderhistory.html')
+
         try:
+            self.importer._generate_report()
             report = self.importer._get_report(report_date='03/18/15')
         except Exception as e:
             print(e)
