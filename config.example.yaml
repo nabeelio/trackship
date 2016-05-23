@@ -3,10 +3,14 @@
 #
 
 general:
+  tmp_path: tmp
   phantomjs: /usr/local/bin/phantomjs
   importers:
     - amazon
 
 amazon:
+  url: https://www.amazon.com
   email:
   password:
+  order_history_weeks: 2
+  delete_reports: True
