@@ -1,9 +1,19 @@
 #
+import os
+import re
 import time
 import arrow
+from urllib.parse import urlparse, parse_qs
+
+from trackship import LOG
 from collections import namedtuple
 from trackship.phantomjs import PhantomJS
 from trackship.importers.base import BaseImporter
+
+
+def log(method, *args):
+    for msg in args:
+        method('Amazon: %s' % str(msg))
 
 
 ReportRow = namedtuple('ReportRow', ['date',
@@ -16,17 +26,24 @@ ReportRow = namedtuple('ReportRow', ['date',
 class Importer(BaseImporter):
 
     __ORDER_LINK__ = 'https://www.amazon.com/gp/b2b/reports'
+    __CSV_TOKEN_URL__ = re.compile(
+        '^.*window\.location\.href=\"(?P<url>.*)\".*',
+        re.IGNORECASE | re.MULTILINE
+    )
 
     def __init__(self, pjs=None):
 
         super(Importer, self).__init__()
 
+        self.cookies_file = '{b}/amazon_cookies.yaml'.format(
+            b=self.conf['general']['tmp_path']
+        )
+
         self.pjs = pjs
         if not self.pjs:
-            self.pjs = PhantomJS(cookies_file='amazon.yaml',
+            self.pjs = PhantomJS(cookies_file=self.cookies_file,
                                  user_agent=PhantomJS.USERAGENT_IOS)
 
-        self.logged_in = False
         self.email = self.conf['amazon']['email']
         self.password = self.conf['amazon']['password']
 
@@ -40,25 +57,39 @@ class Importer(BaseImporter):
 
     def _login(self):
         """ login to amazon """
-        try:
+
+        def __try_login__():
             self.pjs.fill_form(
                 submit=True,
-                fields=(('ap_email', self.email),
-                        ('ap_password', self.password))
+                fields=(
+                    ('ap_email', self.email),
+                    ('ap_password', self.password)
+                )
             )
 
-            self.logged_in = True
+        try:
+
+            __try_login__()
 
             if self._need_sign_in():
-                self.logged_in = False
-                print('Well... looks like the login didn\'t work')
+                # delete the cookies file and then try logging in again
+                log(LOG.info, 'Sign-in failed, trying to delete cookies and try again')
 
-                self.pjs.screenshot('login_no_workie.png')
-                return False
+                # may be nothing there to delete
+                try:
+                    os.remove(self.cookies_file)
+                except FileNotFoundError:
+                    pass
 
-            # save the login information...
-            else:
-                self.pjs.save_cookies()
+                __try_login__()
+
+                # still failed, bail out
+                if self._need_sign_in():
+                    log(LOG.error, 'Login failed (captcha?), going to skip this run...')
+                    return False
+
+            # save the login information... as cookies
+            self.pjs.save_cookies()
 
         except Exception as e:
             print(e)
@@ -68,21 +99,23 @@ class Importer(BaseImporter):
 
     def _get(self, url):
         """ load up a URL"""
+        log(LOG.debug, 'Loading %s' % url)
         self.pjs.get(url)
-        if self._need_sign_in():
-            self._login()
 
-        print('')
+        # check if we were redirected to a login page
+        if self._need_sign_in():
+            return self._login()
 
     def _get_report(self, report_date=None, report_name=None):
         try:
+            self._get(self.__ORDER_LINK__)
+
             table = self.pjs.find_element(
-                # '//*[@id="divsinglecolumnminwidth"]/div[8]/div/div/table'
                 '//*[@id="divsinglecolumnminwidth"]/div[8]/div/div/table/tbody'
             )
 
             if not table:
-                print('no table')
+                return
 
             # iterate through every row in the reports table
             tr = table.find_elements_by_tag_name('tr')
@@ -100,33 +133,66 @@ class Importer(BaseImporter):
                 date = date.text.strip()
                 rpt_name = rpt_name.text.strip()
 
-                # get the actual link to the csv report
-                dl = dl.find_element_by_tag_name('a')
-                if dl:
-                    dl = dl.get_attribute('href')
-
-                if report_date and report_date != date:
-                    continue
+                log(LOG.debug, 'Checking report "{f}"...'.format(f=rpt_name))
 
                 if report_name and rpt_name != report_name:
                     continue
 
+                # get the actual link to the csv report
+                try:
+                    dl = dl.find_element_by_tag_name('a')
+                except Exception as e:  # not generating yet
+                    continue
+
+                if report_date and report_date != date:
+                    continue
+
+                log(LOG.info, 'Report "%s" was found, yay!' % rpt_name)
                 return ReportRow(date=date,
                                  name=rpt_name,
                                  type=rpt_type.text.strip(),
                                  status=status.text.strip(),
-                                 link=dl,
-                                 )
+                                 link=dl)
         except Exception as e:
             print(e)
+
+    def _get_report_link(self):
+        """ """
+        # we want to find the script that contains the above regex
+        # it'll be in a script that has the downloadReport fn
+        script_xpath = '//*[@id="divsinglecolumnminwidth"]/script'
+        scripts = self.pjs.find_elements(script_xpath)
+        for script in scripts:
+            src = script.get_attribute('outerHTML')
+            if 'function downloadReport(reportID)' not in src:
+                continue
+
+            lines = src.split('\n')
+            for line in lines:
+                line = line.strip()
+                if not line: continue
+
+                matches = self.__CSV_TOKEN_URL__.match(line)
+                if not matches:
+                    continue
+
+                url = matches.group('url')
+                url = '%s%s' % (self.conf['amazon']['url'], url)
+                return url
 
     def _generate_report(self):
 
         dt = arrow.utcnow()
-        dt_last_week = dt.replace(weeks=-1)
 
-        report_name = dt.format()
+        # how many weeks back to request the order history
+        num_weeks = self.conf['amazon']['order_history_weeks'] or 1
+        dt_last_week = dt.replace(weeks=num_weeks * -1)
+
+        # title the report with the current date/time
+        # just generate a report hourly
+        report_name = dt.format('YYYYMMDD.HH')
         report_name_xp = '//*[@id="report-name"]'
+        report_type_xp = '//*[@id="report-type"]'
 
         start_month_xp = '//*[@id="report-month-start"]'
         start_day_xp = '//*[@id="report-day-start"]'
@@ -136,65 +202,89 @@ class Importer(BaseImporter):
         end_day_xp = '//*[@id="report-day-end"]'
         end_year_xp = '//*[@id="report-year-end"]'
 
+        fields = (
+            # orders and shipments type...
+            (report_type_xp, 'Orders and shipments'),
+
+            # go back one week
+            (start_month_xp, dt_last_week.format('MMMM')),
+            (start_day_xp, dt_last_week.format('D')),
+            (start_year_xp, dt_last_week.format('YYYY')),
+
+            # and end with today
+            (end_month_xp, dt.format('MMMM')),
+            (end_day_xp, dt.format('D')),
+            (end_year_xp, dt.format('YYYY')),
+
+            # aaand the report name, just with dt
+            (report_name_xp, report_name)
+        )
+
+        log(LOG.debug, 'Filling in report fields', fields)
+
         try:
-            self.pjs.fill_form(
-                submit=True,
-                fields=(
-                    # go back one week
-                    (start_month_xp, dt_last_week.format('MMMM')),
-                    (start_day_xp, dt_last_week.format('D')),
-                    (start_year_xp, dt_last_week.format('YYYY')),
-
-                    # and end with today
-                    (end_month_xp, dt.format('MMMM')),
-                    (end_day_xp, dt.format('D')),
-                    (end_year_xp, dt.format('YYYY')),
-
-                    # aaand the report name, just with dt
-                    (report_name_xp, report_name)
-                )
-            )
+            # see if the report already exists before trying to generate
+            report_link = self._get_report(report_name=report_name)
+            if not report_link:
+                self.pjs.fill_form(submit=True, fields=fields)
         except Exception as e:
-            print(e)
-
-        print(self.pjs.cookies)
+            LOG.exception(e)
 
         # wait until the report is generated
-        # TODO: Max retries
-        while True:
-            # time.sleep(15)
-            self._get(self.__ORDER_LINK__)
+        tries = 0
+        retries = 20
+        while tries <= retries:
+            tries += 1
+
+            LOG.debug('Checking reports page for "{r}"'.format(
+                r=report_name
+            ))
+
             report_link = self._get_report(report_name=report_name)
             if not report_link:
                 continue
 
             # report has finished generating
+            log(LOG.debug, 'Amazon: Report "%s" status: "%s"'
+                % (report_link.name, report_link.status))
+
             if 'complete' in report_link.status.lower():
-                self._get(report_link.link)
-                print(self.pjs.page_source)
+                # reload the page by clicking on the download link
+                # it'll set in JS the link to the actual CSV to forward to
+                report_link.link.click()
+
+                # searches the javascript for the window.location and download it
+                link = self._get_report_link()
+                self._get(link)
+
+                try:
+                    self.pjs.download(link)
+                except Exception as e:
+                    LOG.exception(e)
+
                 break
+
+                # return CSV?
             else:
                 time.sleep(5)
 
-            print(report_link)
+        return None
 
     def list_orders(self):
         """
         generate and then download the order report. login with selenium,
         then fill out the order report form, and wait until it's been generated
         """
+        log(LOG.info, 'Listing orders...')
         try:
-            self._get(self.__ORDER_LINK__)
-            if not self.logged_in:
-                print('Could not log in, skipping')
-            else:
-                report_name = self._generate_report()
+            if not self._get(self.__ORDER_LINK__):
+                log(LOG.error, 'Error logging into or loading page')
 
-            print(self.pjs.page_source)
-
+            csv = self._generate_report()
+            print(csv)
         except Exception as e:
-            print (e)
+            LOG.exception(e)
 
         # set the fields now to pull a report from the last 30 days...
 
-        print('orders')
+        LOG.info('Completed running Amazon importer')

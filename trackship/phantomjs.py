@@ -1,6 +1,8 @@
 
 import yaml
-from trackship import config
+import requests
+from trackship import config, LOG
+from requests.utils import RequestsCookieJar
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -26,23 +28,20 @@ class PhantomJS(object):
         :return:
         """
         self.conf = config
-        self.cookies_file = '{b}/{f}'.format(
-            b=config['general']['tmp_path'],
-            f=cookies_file
-        )
+        self.cookies_file = cookies_file
 
         # http://phantomjs.org/api/webpage/property/settings.html
         dcap = dict(DesiredCapabilities.PHANTOMJS)
-        dcap["phantomjs.page.settings.loadImages"] = False
-        dcap["phantomjs.page.settings.webSecurityEnabled"] = False
-        dcap["phantomjs.page.settings.localToRemoteUrlAccessEnabled"] = True
+        dcap['phantomjs.page.settings.loadImages'] = False
+        dcap['phantomjs.page.settings.webSecurityEnabled'] = False
+        dcap['phantomjs.page.settings.localToRemoteUrlAccessEnabled'] = True
 
         if user_agent:
-            dcap["phantomjs.page.settings.userAgent"] = user_agent
+            dcap['phantomjs.page.settings.userAgent'] = user_agent
 
         self.driver = webdriver.PhantomJS(
             desired_capabilities=dcap,
-            executable_path=self.conf['general']['phantomjs']
+            executable_path=self.conf['general']['phantomjs'],
         )
 
         self.load_cookies()
@@ -73,8 +72,16 @@ class PhantomJS(object):
         try:
             with open(self.cookies_file, 'r') as f:
                 cookies = yaml.load(f)
-                for cookie in cookies:
-                    self.driver.add_cookie(cookie)
+                for c in cookies:
+                    if c['name'] in ('csm-hit',):
+                        continue
+
+                    try:
+                        self.driver.add_cookie(c)
+                    except Exception as e:
+                        LOG.exception(e)
+                        continue
+
         except FileNotFoundError:
             pass
 
@@ -82,11 +89,47 @@ class PhantomJS(object):
         with open(self.cookies_file, 'w') as f:
             yaml.dump(self.cookies, f)
 
+    def download(self, url, file_path=None):
+        """ download a file to a certain path """
+        cookie_jar = RequestsCookieJar()
+        for cookie in self.cookies:
+            if 'httponly' in cookie:
+                del cookie['httponly']
+
+            if 'expiry' in cookie:
+                del cookie['expiry']
+
+            cookie_jar.set(name=cookie['name'],
+                           value=cookie['value'],
+                           **cookie)
+
+        with requests.Session() as s:
+            s.cookies = cookie_jar
+            r = s.get(url=url, allow_redirects=True)
+            if not file_path:
+                return r.content
+
+            # write it out to file...
+            # TODO (nshahzad): error handling
+            with open(file_path, 'w') as f:
+                f.write(r.content)
+
     def find_element(self, xpath):
         element = None
         try:
             element = WebDriverWait(self.driver, 10).until(
                 EC.presence_of_element_located((By.XPATH, xpath))
+            )
+        except Exception as e:
+            print(e)
+
+        return element
+
+    def find_elements(self, xpath):
+        element = None
+        try:
+            element = WebDriverWait(self.driver, 10).until(
+                EC.presence_of_all_elements_located((By.XPATH, xpath))
             )
         except Exception as e:
             print(e)

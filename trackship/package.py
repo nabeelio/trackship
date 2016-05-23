@@ -3,11 +3,16 @@
 
 class Package(object):
 
-    def __init__(self, name, tracking_id, tracking_service):
-        self.name = name
-        self._trk_id = tracking_id
+    def __init__(self,
+                 name,
+                 source,
+                 tracking_id,
+                 tracking_service):
 
-        # TODO: Normalize this tracking service name?
+        self.name = name
+        self.source = source
+
+        self._trk_id = tracking_id
         self._trk_svc = tracking_service
 
     @property
