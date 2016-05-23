@@ -4,9 +4,11 @@ import time
 import arrow
 
 from trackship import LOG
-from collections import namedtuple
+from trackship.package import Package
 from trackship.phantomjs import PhantomJS
 from trackship.importers.base import BaseImporter
+
+from collections import namedtuple
 
 
 def log(method, *args):
@@ -18,7 +20,7 @@ ReportRow = namedtuple('ReportRow', ['date',
                                      'type',
                                      'name',
                                      'status',
-                                     'link'])
+                                     'download'])
 
 
 class Importer(BaseImporter):
@@ -147,7 +149,7 @@ class Importer(BaseImporter):
                                  name=rpt_name,
                                  type=rpt_type.text.strip(),
                                  status=status.text.strip(),
-                                 link=dl)
+                                 download=dl)
         except Exception as e:
             print(e)
 
@@ -165,7 +167,7 @@ class Importer(BaseImporter):
             lines = src.split('\n')
             for line in lines:
                 line = line.strip()
-                if not line:  # blank line?
+                if not line:  # blank line
                     continue
 
                 # see if the line in this script has the CSV url
@@ -173,8 +175,13 @@ class Importer(BaseImporter):
                 if not matches:
                     continue
 
-                url = matches.group('url')
-                url = '%s%s' % (self.conf['amazon']['url'], url)
+                url = '{base_url}/{csv_path}'.format(
+                    base_url=self.conf['amazon']['url'],
+                    csv_path=matches.group('url')
+                ).replace('//', '/')
+
+                log(LOG.info, 'CSV URL: %s' % url)
+
                 return url
 
     def _generate_report(self):
@@ -182,6 +189,8 @@ class Importer(BaseImporter):
         # just generate a report hourly
         dt = arrow.utcnow()
         report_name = dt.format('YYYYMMDD.HH')
+
+        log(LOG.info, 'Report name: "%s"' % report_name)
 
         # ######################################################################
         def __request_report__():
@@ -237,6 +246,7 @@ class Importer(BaseImporter):
         tries = 0
         retries = 20
         while tries <= retries:
+
             tries += 1
 
             LOG.debug('Checking reports page for "{r}"'.format(
@@ -248,27 +258,23 @@ class Importer(BaseImporter):
                 continue
 
             # report has finished generating
-            log(LOG.debug, 'Amazon: Report "%s" status: "%s"'
-                % (report.name, report.status))
+            log(LOG.debug, 'Amazon: Report "%s" status: "%s"' % (report.name, report.status))
 
             if 'complete' in report_link.status.lower():
                 # reload the page by clicking on the download link
                 # it'll set in JS the link to the actual CSV to forward to
-                report.link.click()
-
-                # searches the javascript for the window.location and download it
-                link = self._get_report_link()
-                self._get(link)
+                report.download.click()
 
                 try:
-                    csv = self.pjs.download(link)
+                    # searches the javascript for the window.location and download it
+                    csv_link = self._get_report_link()
+                    csv = self.pjs.download(csv_link)
                     return csv
                 except Exception as e:
                     LOG.exception(e)
+                    break
             else:
                 time.sleep(5)
-
-        return None
 
     def list_orders(self):
         """
@@ -284,7 +290,5 @@ class Importer(BaseImporter):
             print(csv)
         except Exception as e:
             LOG.exception(e)
-
-        # set the fields now to pull a report from the last 30 days...
 
         LOG.info('Completed running Amazon importer')
