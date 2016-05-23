@@ -100,15 +100,10 @@ class PhantomJS(object):
         """ download a file to a certain path """
         cookie_jar = RequestsCookieJar()
         for cookie in self.cookies:
-            if 'httponly' in cookie:
-                del cookie['httponly']
-
-            if 'expiry' in cookie:
-                del cookie['expiry']
-
             cookie_jar.set(name=cookie['name'],
                            value=cookie['value'],
-                           **cookie)
+                           domain=cookie['domain'],
+                           path=cookie['path'])
 
         with requests.Session() as s:
             s.cookies = cookie_jar
