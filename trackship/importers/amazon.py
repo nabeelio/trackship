@@ -1,9 +1,7 @@
 #
-import os
 import re
 import time
 import arrow
-from urllib.parse import urlparse, parse_qs
 
 from trackship import LOG
 from collections import namedtuple
@@ -76,10 +74,7 @@ class Importer(BaseImporter):
                 log(LOG.info, 'Sign-in failed, trying to delete cookies and try again')
 
                 # may be nothing there to delete
-                try:
-                    os.remove(self.cookies_file)
-                except FileNotFoundError:
-                    pass
+                self.pjs.delete_cookie_file()
 
                 __try_login__()
 
@@ -157,9 +152,9 @@ class Importer(BaseImporter):
             print(e)
 
     def _get_report_link(self):
-        """ """
-        # we want to find the script that contains the above regex
-        # it'll be in a script that has the downloadReport fn
+        """ we want to find the script that contains the above regex
+            it'll be in a script that has the downloadReport fn
+        """
         script_xpath = '//*[@id="divsinglecolumnminwidth"]/script'
         scripts = self.pjs.find_elements(script_xpath)
         for script in scripts:
@@ -170,8 +165,10 @@ class Importer(BaseImporter):
             lines = src.split('\n')
             for line in lines:
                 line = line.strip()
-                if not line: continue
+                if not line:  # blank line?
+                    continue
 
+                # see if the line in this script has the CSV url
                 matches = self.__CSV_TOKEN_URL__.match(line)
                 if not matches:
                     continue
@@ -181,52 +178,58 @@ class Importer(BaseImporter):
                 return url
 
     def _generate_report(self):
-
-        dt = arrow.utcnow()
-
-        # how many weeks back to request the order history
-        num_weeks = self.conf['amazon']['order_history_weeks'] or 1
-        dt_last_week = dt.replace(weeks=num_weeks * -1)
-
         # title the report with the current date/time
         # just generate a report hourly
+        dt = arrow.utcnow()
         report_name = dt.format('YYYYMMDD.HH')
-        report_name_xp = '//*[@id="report-name"]'
-        report_type_xp = '//*[@id="report-type"]'
 
-        start_month_xp = '//*[@id="report-month-start"]'
-        start_day_xp = '//*[@id="report-day-start"]'
-        start_year_xp = '//*[@id="report-year-start"]'
+        # ######################################################################
+        def __request_report__():
+            """ request that an order report be generated """
+            # how many weeks back to request the order history
+            num_weeks = self.conf['amazon']['order_history_weeks'] or 1
 
-        end_month_xp = '//*[@id="report-month-end"]'
-        end_day_xp = '//*[@id="report-day-end"]'
-        end_year_xp = '//*[@id="report-year-end"]'
+            dt_last_week = dt.replace(weeks=num_weeks * -1)
+            report_name_xp = '//*[@id="report-name"]'
+            report_type_xp = '//*[@id="report-type"]'
 
-        fields = (
-            # orders and shipments type...
-            (report_type_xp, 'Orders and shipments'),
+            start_month_xp = '//*[@id="report-month-start"]'
+            start_day_xp = '//*[@id="report-day-start"]'
+            start_year_xp = '//*[@id="report-year-start"]'
 
-            # go back one week
-            (start_month_xp, dt_last_week.format('MMMM')),
-            (start_day_xp, dt_last_week.format('D')),
-            (start_year_xp, dt_last_week.format('YYYY')),
+            end_month_xp = '//*[@id="report-month-end"]'
+            end_day_xp = '//*[@id="report-day-end"]'
+            end_year_xp = '//*[@id="report-year-end"]'
 
-            # and end with today
-            (end_month_xp, dt.format('MMMM')),
-            (end_day_xp, dt.format('D')),
-            (end_year_xp, dt.format('YYYY')),
+            fields = (
+                # orders and shipments type...
+                (report_type_xp, 'Orders and shipments'),
 
-            # aaand the report name, just with dt
-            (report_name_xp, report_name)
-        )
+                # go back one week
+                (start_month_xp, dt_last_week.format('MMMM')),
+                (start_day_xp, dt_last_week.format('D')),
+                (start_year_xp, dt_last_week.format('YYYY')),
 
-        log(LOG.debug, 'Filling in report fields', fields)
+                # and end with today
+                (end_month_xp, dt.format('MMMM')),
+                (end_day_xp, dt.format('D')),
+                (end_year_xp, dt.format('YYYY')),
+
+                # aaand the report name, just with dt
+                (report_name_xp, report_name)
+            )
+
+            log(LOG.debug, 'Filling in report fields', fields)
+
+            self.pjs.fill_form(submit=True, fields=fields)
+
+        # ######################################################################
 
         try:
             # see if the report already exists before trying to generate
             report_link = self._get_report(report_name=report_name)
             if not report_link:
-                self.pjs.fill_form(submit=True, fields=fields)
+                __request_report__()
         except Exception as e:
             LOG.exception(e)
 
@@ -240,31 +243,28 @@ class Importer(BaseImporter):
                 r=report_name
             ))
 
-            report_link = self._get_report(report_name=report_name)
-            if not report_link:
+            report = self._get_report(report_name=report_name)
+            if not report:
                 continue
 
             # report has finished generating
             log(LOG.debug, 'Amazon: Report "%s" status: "%s"'
-                % (report_link.name, report_link.status))
+                % (report.name, report.status))
 
             if 'complete' in report_link.status.lower():
                 # reload the page by clicking on the download link
                 # it'll set in JS the link to the actual CSV to forward to
-                report_link.link.click()
+                report.link.click()
 
                 # searches the javascript for the window.location and download it
                 link = self._get_report_link()
                 self._get(link)
 
                 try:
-                    self.pjs.download(link)
+                    csv = self.pjs.download(link)
+                    return csv
                 except Exception as e:
                     LOG.exception(e)
-
-                break
-
-                # return CSV?
             else:
                 time.sleep(5)
 

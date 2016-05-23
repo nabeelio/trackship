@@ -1,4 +1,5 @@
 
+import os
 import yaml
 import requests
 from trackship import config, LOG
@@ -88,6 +89,12 @@ class PhantomJS(object):
     def save_cookies(self):
         with open(self.cookies_file, 'w') as f:
             yaml.dump(self.cookies, f)
+
+    def delete_cookie_file(self):
+        try:
+            os.remove(self.cookies_file)
+        except FileNotFoundError:
+            pass
 
     def download(self, url, file_path=None):
         """ download a file to a certain path """
