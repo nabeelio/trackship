@@ -67,3 +67,4 @@ config.yaml
 *.png
 ghostdriver.log*
 tmp/*.yaml
+tmp/*.csv

@@ -1,5 +1,7 @@
 #
+import os
 import re
+import csv
 import time
 import arrow
 
@@ -9,11 +11,6 @@ from trackship.phantomjs import PhantomJS
 from trackship.importers.base import BaseImporter
 
 from collections import namedtuple
-
-
-def log(method, *args):
-    for msg in args:
-        method('Amazon: %s' % str(msg))
 
 
 ReportRow = namedtuple('ReportRow', ['date',
@@ -31,12 +28,21 @@ class Importer(BaseImporter):
         re.IGNORECASE | re.MULTILINE
     )
 
+    __PACKAGE_ID__ = re.compile(
+        '(?P<carrier>.*)\((?P<id>.*)\)',
+        re.IGNORECASE
+    )
+
     def __init__(self, pjs=None):
 
-        super(Importer, self).__init__()
+        super(Importer, self).__init__('Amazon')
 
         self.cookies_file = '{b}/amazon_cookies.yaml'.format(
             b=self.conf['general']['tmp_path']
+        )
+
+        self.csv_file = '{tmp}/amazon.csv'.format(
+            tmp=self.conf['general']['tmp_path']
         )
 
         self.pjs = pjs
@@ -73,7 +79,7 @@ class Importer(BaseImporter):
 
             if self._need_sign_in():
                 # delete the cookies file and then try logging in again
-                log(LOG.info, 'Sign-in failed, trying to delete cookies and try again')
+                self.log(LOG.info, 'Sign-in failed, trying to delete cookies and try again')
 
                 # may be nothing there to delete
                 self.pjs.delete_cookie_file()
@@ -82,7 +88,7 @@ class Importer(BaseImporter):
 
                 # still failed, bail out
                 if self._need_sign_in():
-                    log(LOG.error, 'Login failed (captcha?), going to skip this run...')
+                    self.log(LOG.error, 'Login failed (captcha?), going to skip this run...')
                     return False
 
             # save the login information... as cookies
@@ -96,7 +102,7 @@ class Importer(BaseImporter):
 
     def _get(self, url):
         """ load up a URL"""
-        log(LOG.debug, 'Loading %s' % url)
+        self.log(LOG.debug, 'Loading %s' % url)
         self.pjs.get(url)
 
         # check if we were redirected to a login page
@@ -130,7 +136,7 @@ class Importer(BaseImporter):
                 date = date.text.strip()
                 rpt_name = rpt_name.text.strip()
 
-                log(LOG.debug, 'Checking report "{f}"...'.format(f=rpt_name))
+                self.log(LOG.debug, 'Checking report "{f}"...'.format(f=rpt_name))
 
                 if report_name and rpt_name != report_name:
                     continue
@@ -144,7 +150,7 @@ class Importer(BaseImporter):
                 if report_date and report_date != date:
                     continue
 
-                log(LOG.info, 'Report "%s" was found, yay!' % rpt_name)
+                self.log(LOG.info, 'Report "%s" was found, yay!' % rpt_name)
                 return ReportRow(date=date,
                                  name=rpt_name,
                                  type=rpt_type.text.strip(),
@@ -178,9 +184,9 @@ class Importer(BaseImporter):
                 url = '{base_url}/{csv_path}'.format(
                     base_url=self.conf['amazon']['url'],
                     csv_path=matches.group('url')
-                ).replace('//', '/')
+                )
 
-                log(LOG.info, 'CSV URL: %s' % url)
+                self.log(LOG.info, 'CSV URL: %s' % url)
 
                 return url
 
@@ -190,13 +196,13 @@ class Importer(BaseImporter):
         dt = arrow.utcnow()
         report_name = dt.format('YYYYMMDD.HH')
 
-        log(LOG.info, 'Report name: "%s"' % report_name)
+        self.log(LOG.info, 'Report name: "%s"' % report_name)
 
         # ######################################################################
         def __request_report__():
             """ request that an order report be generated """
             # how many weeks back to request the order history
-            num_weeks = self.conf['amazon']['order_history_weeks'] or 1
+            num_weeks = self.conf['amazon']['order_history_weeks'] or 4
 
             dt_last_week = dt.replace(weeks=num_weeks * -1)
             report_name_xp = '//*[@id="report-name"]'
@@ -228,7 +234,7 @@ class Importer(BaseImporter):
                 (report_name_xp, report_name)
             )
 
-            log(LOG.debug, 'Filling in report fields', fields)
+            self.log(LOG.debug, 'Filling in report fields', fields)
 
             self.pjs.fill_form(submit=True, fields=fields)
 
@@ -258,9 +264,9 @@ class Importer(BaseImporter):
                 continue
 
             # report has finished generating
-            log(LOG.debug, 'Amazon: Report "%s" status: "%s"' % (report.name, report.status))
+            self.log(LOG.debug, 'Amazon: Report "%s" status: "%s"' % (report.name, report.status))
 
-            if 'complete' in report_link.status.lower():
+            if 'complete' in report.status.lower():
                 # reload the page by clicking on the download link
                 # it'll set in JS the link to the actual CSV to forward to
                 report.download.click()
@@ -268,7 +274,7 @@ class Importer(BaseImporter):
                 try:
                     # searches the javascript for the window.location and download it
                     csv_link = self._get_report_link()
-                    csv = self.pjs.download(csv_link)
+                    csv = self.pjs.download(csv_link, self.csv_file)
                     return csv
                 except Exception as e:
                     LOG.exception(e)
@@ -276,18 +282,65 @@ class Importer(BaseImporter):
             else:
                 time.sleep(5)
 
+    def _parse_csv(self):
+        """
+        Parse the CSV file and return a bunch of package objects
+        :return:
+        """
+        packages = []
+        skip_first = False
+        with open(self.csv_file, 'r') as fp:
+            orders = csv.reader(fp)
+            for order in orders:
+                if not skip_first:
+                    skip_first = True
+                    continue
+
+                order_id = order[1]
+                status = order[13]
+                shipping = self.__PACKAGE_ID__.match(order[14] or '')
+                if not shipping:
+                    continue
+
+                pkg = Package(name=order_id,
+                              source='Amazon',
+                              order_status=status,
+                              tracking_id=shipping.group('id'),
+                              carrier=shipping.group('carrier'))
+
+                packages.append(pkg)
+
+        return packages
+
+
     def list_orders(self):
         """
         generate and then download the order report. login with selenium,
         then fill out the order report form, and wait until it's been generated
         """
-        log(LOG.info, 'Listing orders...')
+        self.log(LOG.info, 'Listing orders...')
+
         try:
+            if os.path.isfile(self.csv_file):
+                mod_time = os.path.getmtime(self.csv_file)
+                curr_time = int(time.time())
+
+                # don't consider it stale if it's less than an hour old
+                if curr_time - mod_time < (60 * 60):
+                    return self._parse_csv()
+
+                # delete the file if it's under an hour old
+                else:
+                    try:
+                        os.remove(self.csv_file)
+                    except FileNotFoundError:
+                        pass
+
             if not self._get(self.__ORDER_LINK__):
-                log(LOG.error, 'Error logging into or loading page')
+                self.log(LOG.error, 'Error logging into or loading page')
 
             csv = self._generate_report()
-            print(csv)
+            return self._parse_csv()
         except Exception as e:
             LOG.exception(e)
 

@@ -4,16 +4,18 @@
 class Package(object):
 
     def __init__(self,
-                 name,
                  source,
                  tracking_id,
-                 tracking_service):
+                 name='',
+                 order_status=None,
+                 carrier=None):
 
         self.name = name
         self.source = source
+        self.order_status = order_status
 
         self._trk_id = tracking_id
-        self._trk_svc = tracking_service
+        self._carrier = carrier
 
     @property
     def id(self):
@@ -21,4 +23,4 @@ class Package(object):
 
     @property
     def service(self):
-        return self._trk_svc
+        return self._carrier

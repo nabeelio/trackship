@@ -29,6 +29,7 @@ class PhantomJS(object):
         :return:
         """
         self.conf = config
+        self.user_agent = user_agent
         self.cookies_file = cookies_file
 
         # http://phantomjs.org/api/webpage/property/settings.html
@@ -100,21 +101,38 @@ class PhantomJS(object):
         """ download a file to a certain path """
         cookie_jar = RequestsCookieJar()
         for cookie in self.cookies:
-            cookie_jar.set(name=cookie['name'],
-                           value=cookie['value'],
-                           domain=cookie['domain'],
-                           path=cookie['path'])
+            vals = {
+                'name': cookie['name'],
+                'value': cookie['value']
+            }
 
-        with requests.Session() as s:
-            s.cookies = cookie_jar
-            r = s.get(url=url, allow_redirects=True)
-            if not file_path:
-                return r.content
+            if cookie.get('domain'):
+                vals['domain'] = cookie.get('domain')
 
+            if cookie.get('path'):
+                vals['path'] = cookie.get('path')
+
+            if cookie.get('expiry'):
+                vals['expires'] = cookie.get('expiry')
+
+            cookie_jar.set(**vals)
+
+        headers = {
+            'User-Agent': self.user_agent
+        }
+
+        r = requests.get(url=url,
+                         headers=headers,
+                         cookies=cookie_jar,
+                         allow_redirects=True)
+
+        if file_path:
             # write it out to file...
             # TODO (nshahzad): error handling
             with open(file_path, 'w') as f:
-                f.write(r.content)
+                f.write(r.text)
+
+        return r.text
 
     def find_element(self, xpath):
         element = None
